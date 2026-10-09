@@ -1,0 +1,6 @@
+# The engine this page runs. scripts/build.mjs builds cjcm.wasm from exactly
+# this commit with exactly this Go version; the page shows the SHA-256 of the
+# bytes it is running, and anyone can rebuild and compare.
+repo=https://github.com/baotnq/cause-justified-change-monitoring.git
+commit=4a73fd728e03efe36dff7626a0f6fe97de6d13d0
+go=go1.27.1

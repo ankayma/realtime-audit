@@ -1,0 +1,15 @@
+{
+  "name": "realtime-audit-trial",
+  "private": true,
+  "description": "audit.ankayma.com: the Realtime Audit trial page, running the CJCM engine in the browser",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "serve": "node scripts/serve.mjs",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
