@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Nothing on this page can open a connection: connect-src 'none'. The engine
+     is embedded in engine.js, the sample case in data.js. The worker is created
+     from a blob: URL so that it inherits this policy. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Try Realtime Audit</title>
+<meta name="description" content="Check every balance change against an approved cause, in your browser. Your files never leave it.">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="https://ankayma.com/realtime-audit" rel="noreferrer">Ankayma · Realtime Audit</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>Try Realtime Audit on your own data.</h1>
+    <p class="promise"><strong>Your files never leave this browser.</strong> No upload, no account, no tracking. Close the tab and everything is gone.</p>
+    <p class="engine-status" id="engine-status" role="status">Loading the engine…</p>
+    <p class="muted">No files to hand? <a href="#sample">See the sample case</a> or use the templates below.</p>
+  </section>
+
+
+  <section id="yours" aria-labelledby="yours-h">
+    <h2 id="yours-h"><span class="step">1</span> Drop your own files</h2>
+    <p>Two files: <strong>causes</strong> and <strong>changes</strong>. CSV or JSONL. <button type="button" class="link" data-template="causes.csv">causes.csv template</button> · <button type="button" class="link" data-template="changes.csv">changes.csv template</button></p>
+
+    <div class="drops">
+      <label class="drop" id="drop-causes" tabindex="0">
+        <input type="file" id="file-causes" accept=".csv,.jsonl,.json,.txt,text/csv,application/json">
+        <span class="drop-title">Causes</span>
+        <span class="drop-hint">one row per event allowed to move a balance, from two or more independent services</span>
+        <span class="drop-file" id="name-causes">Drop a file or click to choose</span>
+      </label>
+      <label class="drop" id="drop-changes" tabindex="0">
+        <input type="file" id="file-changes" accept=".csv,.jsonl,.json,.txt,text/csv,application/json">
+        <span class="drop-title">Changes</span>
+        <span class="drop-hint">one row per write to a balance</span>
+        <span class="drop-file" id="name-changes">Drop a file or click to choose</span>
+      </label>
+    </div>
+
+    <div class="columns-help">
+      <p><strong>Causes:</strong> <code>id</code> · <code>type</code> (deposit, withdrawal, fill, transfer, fee) · <code>account</code> · <code>asset</code> (optional) · <code>amount</code> (signed) · <code>time</code> · <code>producer</code> (the service that issued it) · <code>ref</code> (optional)</p>
+      <p><strong>Changes:</strong> <code>account</code> · <code>asset</code> (optional) · <code>delta</code> (signed) · <code>time</code> · <code>source</code> (where the write was observed)</p>
+      <p class="muted">Common alternatives such as <code>user_id</code>, <code>currency</code> or <code>timestamp</code> are recognised. Anything else, you map after the first run.</p>
+    </div>
+
+    <form id="settings" class="settings">
+      <label>Window
+        <select id="opt-window">
+          <option value="10">10 s</option>
+          <option value="30">30 s</option>
+          <option value="60" selected>60 s</option>
+          <option value="300">5 min</option>
+          <option value="900">15 min</option>
+          <option value="3600">1 h</option>
+        </select>
+      </label>
+      <label>Grace, s <input type="number" id="opt-grace" min="0" step="1" value="0"></label>
+      <label class="check"><input type="checkbox" id="opt-amounts" checked> Check amounts</label>
+      <label class="check"><input type="checkbox" id="opt-require-id" checked> Require a cause id</label>
+      <details class="advanced">
+        <summary>Producers and cause types</summary>
+        <label>Trusted producers <span class="muted">comma-separated; empty trusts every producer</span>
+          <input type="text" id="opt-producers" placeholder="deposit-service, matching-engine" autocomplete="off" spellcheck="false"></label>
+        <label>Derived cause types <span class="muted">must have a root cause for the same balance in the window</span>
+          <input type="text" id="opt-derived" placeholder="balance.updated" autocomplete="off" spellcheck="false"></label>
+        <label>Root cause types
+          <input type="text" id="opt-roots" placeholder="deposit, fill, transfer" autocomplete="off" spellcheck="false"></label>
+        <label>Cause chains <span class="muted">a cause from several independent services, root first, one chain per line (e.g. the user frontend's request, then the backoffice approval). The last stage justifies a write only if its <code>ref</code> leads back through every stage. Stages are joined by id, so an approval hours after the request is fine.</span>
+          <textarea id="opt-chains" rows="2" autocomplete="off" spellcheck="false">deposit.detected@chain-indexer > deposit.credited@deposit-service
+withdrawal.requested@user-api > withdrawal.approved@admin-console</textarea></label>
+        <label>Single-account cause types <span class="muted">an id of these types may move one balance only; on a second account it is a reused cause</span>
+          <input type="text" id="opt-single" value="deposit, withdrawal, deposit.credited, withdrawal.approved" autocomplete="off" spellcheck="false"></label>
+      </details>
+      <div class="actions">
+        <button type="submit" id="run" disabled>Run the check</button>
+        <button type="button" id="load-sample" class="secondary">Use the sample files</button>
+      </div>
+    </form>
+    <p class="muted size-note">Measured: about 3.8 s for 27 MB of input, 16 s for 135 MB. Above roughly 150 MB a browser tab may run out of memory; run the same check offline instead, with the <a href="https://github.com/baotnq/cause-justified-change-monitoring/blob/main/cmd/audit/main.go" rel="noreferrer">audit CLI</a>.</p>
+  </section>
+
+  <section id="result-section" aria-labelledby="result-h" hidden>
+    <h2 id="result-h"><span class="step">2</span> Read the result</h2>
+    <div id="columns" class="mapping" hidden></div>
+    <div id="result" class="result" aria-live="polite"></div>
+  </section>
+
+  <section id="sample" aria-labelledby="sample-h">
+    <h2 id="sample-h">Sample case: a withdrawal needs a request and an approval</h2>
+    <p>Already run for you, so you can see what a finding looks like. Two independent services write the causes: the <strong>user frontend</strong> records the user's request (<code>withdrawal.requested</code>), the <strong>backoffice</strong> records the admin's approval about an hour later (<code>withdrawal.approved</code>, pointing at the request in <code>ref</code>). A payout is justified only when both exist, agree, and the request has not been approved before.</p>
+    <ul class="sample-cases">
+      <li><code>A-1</code> approves request <code>R-1</code>: correct.</li>
+      <li><code>A-2</code> approves <code>R-1</code> again: one request, two payouts.</li>
+      <li><code>A-3</code> approves <code>R-404</code>, which nobody requested: an admin paying out alone, or a replay under a new id.</li>
+      <li><code>A-4</code> approves 40,000 on a request for 4,000.</li>
+      <li><code>A-5</code> approves a "user request" that the backoffice wrote itself.</li>
+    </ul>
+    <p class="muted">Without the request as a second source, each approval would justify itself and none of the last four would show.</p>
+    <div class="sample-files">
+      <details><summary>causes.csv <span class="muted" id="sample-causes-n"></span></summary><pre id="sample-causes"></pre></details>
+      <details><summary>changes.csv <span class="muted" id="sample-changes-n"></span></summary><pre id="sample-changes"></pre></details>
+    </div>
+    <div id="sample-result" class="result" aria-live="polite"></div>
+  </section>
+
+  <section id="check" aria-labelledby="check-h">
+    <h2 id="check-h">Check that nothing leaves</h2>
+    <p>You don't have to take our word for it.</p>
+    <ul>
+      <li><strong>Network tab.</strong> Open your browser's developer tools, then drop your files. You'll see no request go out.</li>
+      <li><strong>Offline.</strong> Load this page, turn off your network, and run it again. It works.</li>
+      <li><strong>Policy.</strong> The page's Content-Security-Policy sets <code>connect-src 'none'</code>: the browser itself refuses any request from this page's code. View the source to see it.</li>
+      <li><strong>Source.</strong> The engine is <a href="https://github.com/baotnq/cause-justified-change-monitoring/tree/4a73fd728e03efe36dff7626a0f6fe97de6d13d0" rel="noreferrer">open, at commit 4a73fd7</a>. Build it with go1.27.1 and compare the hash below with the one your browser computed from the bytes it is running.</li>
+    </ul>
+    <p class="build"><code>engine sha256 (published): 98dea95d4f263950953b8d47169c204e25793e3b49ff643415f23154b6508268</code><br><code id="build-live">engine sha256 (computed here): …</code></p>
+  </section>
+
+  <section id="limits" aria-labelledby="limits-h">
+    <h2 id="limits-h">What this trial is, and isn't</h2>
+    <ul>
+      <li>It runs the same check as the product, on what you give it. It isn't an audit: nobody reviews the result, and nothing is signed.</li>
+      <li>Mapping a real export onto these two files is usually the hard part. If your export doesn't fit cleanly, that's the most useful thing to learn here.</li>
+      <li>A partial export produces partial findings. Some "findings" on partial data are gaps in the export, not in the ledger.</li>
+    </ul>
+    <p class="cta">
+      <a class="button" href="https://ankayma.com/realtime-audit/audit-only" rel="noreferrer">Book an audit-only review</a>
+      <a class="button secondary" href="https://ankayma.com/realtime-audit/how-it-works" rel="noreferrer">How it works</a>
+    </p>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  Ankayma · <a href="https://ankayma.com/realtime-audit" rel="noreferrer">ankayma.com/realtime-audit</a> · Method: <a href="https://github.com/baotnq/cause-justified-change-monitoring" rel="noreferrer">cause-justified change monitoring</a>, Apache 2.0
+</footer>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
