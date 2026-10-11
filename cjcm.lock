@@ -2,5 +2,5 @@
 # this commit with exactly this Go version; the page shows the SHA-256 of the
 # bytes it is running, and anyone can rebuild and compare.
 repo=https://github.com/baotnq/cause-justified-change-monitoring.git
-commit=4a73fd728e03efe36dff7626a0f6fe97de6d13d0
+commit=953d399d9558cbb76881eb100e1dabde8cfb515f
 go=go1.27.1

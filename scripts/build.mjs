@@ -72,8 +72,10 @@ const read = p => fs.readFileSync(path.join(src, p), 'utf8');
 const data = {
   build: { commit: lock.commit, go: goVersion, sha256, repo: lock.repo.replace(/\.git$/, '') },
   // The sample case: two sources, the user's request AND the admin's approval.
+  // One causes file per service, as each would export it.
   sample: {
-    causes: read('examples/chain2/causes.csv'),
+    requests: read('examples/chain2/requests.csv'),
+    approvals: read('examples/chain2/approvals.csv'),
     changes: read('examples/chain2/changes.csv'),
     alerts: read('examples/chain2/alerts.jsonl'),
     request: {
@@ -81,9 +83,22 @@ const data = {
       single_actor_types: ['deposit', 'withdrawal'],
       chains: 'withdrawal.requested@user-api > withdrawal.approved@admin-console',
       check_amounts: true, require_cause_id: true,
+      cause_sources: [
+        { name: 'requests.csv', type: 'withdrawal.requested', producer: 'user-api' },
+        { name: 'approvals.csv', type: 'withdrawal.approved', producer: 'admin-console' },
+      ],
     },
   },
-  templates: { 'causes.csv': read('templates/causes.csv'), 'changes.csv': read('templates/changes.csv') },
+  // The two-source files are the sample's; causes.csv is every cause in one
+  // file with a type column.
+  templates: {
+    'requests.csv': read('examples/chain2/requests.csv'),
+    'approvals.csv': read('examples/chain2/approvals.csv'),
+    'changes.csv': read('examples/chain2/changes.csv'),
+    'causes.csv': read('templates/causes.csv'),
+  },
+  // The repository's templates: a clean ledger, every cause in one file.
+  clean: { causes: read('templates/causes.csv'), changes: read('templates/changes.csv') },
 };
 fs.writeFileSync(path.join(dist, 'data.js'), `self.CJCM_DATA=${JSON.stringify(data)};\n`);
 

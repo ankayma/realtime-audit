@@ -18,10 +18,17 @@ async function loaded(page) {
 const sample = () => JSON.parse(fs.readFileSync(new URL('../dist/data.js', import.meta.url), 'utf8')
   .replace(/^self\.CJCM_DATA=/, '').replace(/;\s*$/, '')).sample;
 
+const asFile = (f) => ({ name: f.name, mimeType: 'text/plain', buffer: Buffer.from(f.text) });
+
+// causes is one file or a list, one per source; files already chosen are removed first.
 async function dropFiles(page, causes, changes) {
-  await page.setInputFiles('#file-causes', { name: causes.name, mimeType: 'text/plain', buffer: Buffer.from(causes.text) });
-  await page.setInputFiles('#file-changes', { name: changes.name, mimeType: 'text/plain', buffer: Buffer.from(changes.text) });
+  const remove = page.locator('#cause-sources .remove');
+  while (await remove.count()) await remove.first().click();
+  await page.setInputFiles('#file-causes', [causes].flat().map(asFile));
+  await page.setInputFiles('#file-changes', asFile(changes));
 }
+
+const sampleFiles = (s) => [{ name: 'requests.csv', text: s.requests }, { name: 'approvals.csv', text: s.approvals }];
 
 async function setSampleConfig(page) {
   await page.selectOption('#opt-window', '60');
@@ -54,10 +61,15 @@ test('dropped sample files give the repository alerts, with no request after loa
   const atLoad = requests.length;
 
   const s = sample();
-  await dropFiles(page, { name: 'causes.csv', text: s.causes }, { name: 'changes.csv', text: s.changes });
   await setSampleConfig(page);
+  await dropFiles(page, sampleFiles(s), { name: 'changes.csv', text: s.changes });
+  // Each file's source is guessed from its name.
+  const sources = page.locator('#cause-sources select');
+  await expect(sources.nth(0)).toHaveValue('withdrawal.requested@user-api');
+  await expect(sources.nth(1)).toHaveValue('withdrawal.approved@admin-console');
   await page.click('#run');
   await expectChainFindings(page.locator('#result table.findings tbody tr'));
+  await expect(page.locator('#result')).toContainText('requests.csv: 3 rows read of 3, as withdrawal.requested from user-api');
 
   const download = page.waitForEvent('download');
   await page.locator('#result').getByRole('button', { name: 'Download alerts.jsonl' }).click();
@@ -72,14 +84,14 @@ test('runs offline after load', async ({ page, context }) => {
   await context.setOffline(true);
 
   const s = sample();
-  await dropFiles(page, { name: 'causes.csv', text: s.causes }, { name: 'changes.csv', text: s.changes });
   await setSampleConfig(page);
+  await dropFiles(page, sampleFiles(s), { name: 'changes.csv', text: s.changes });
   await page.click('#run');
   await expectChainFindings(page.locator('#result table.findings tbody tr'));
 
   // The templates are a clean ledger.
-  const t = await page.evaluate(() => self.CJCM_DATA.templates);
-  await dropFiles(page, { name: 'causes.csv', text: t['causes.csv'] }, { name: 'changes.csv', text: t['changes.csv'] });
+  const t = await page.evaluate(() => self.CJCM_DATA.clean);
+  await dropFiles(page, { name: 'causes.csv', text: t.causes }, { name: 'changes.csv', text: t.changes });
   await page.fill('#opt-producers', '');
   await page.fill('#opt-derived', '');
   await page.fill('#opt-roots', '');
@@ -127,10 +139,30 @@ test('bad rows are reported by line, and a missing column can be mapped', async 
   await dropFiles(page, { name: 'causes.csv', text: causes }, { name: 'changes.csv', text: changes });
   await page.click('#run');
   const issues = page.locator('#result .issues');
-  await expect(issues).toContainText('Causes, line 3: time is not a date: "yesterday". Expected ISO 8601');
+  await expect(issues).toContainText('causes.csv, line 3: time is not a date: "yesterday". Expected ISO 8601');
   await expect(issues).toContainText('Changes: column account not found. Found: holder, delta, time. Pick one.');
 
-  await page.selectOption('select[data-file="changes"][data-field="account"]', 'holder');
+  await page.selectOption('select[data-file="Changes"][data-field="account"]', 'holder');
   await expect(page.locator('#result .issues')).not.toContainText('column account not found');
   await expect(page.locator('#result .stats').first()).toContainText('Read 1 cause of 2 rows and 1 change of 1 rows');
+});
+
+test('the sample button loads three files, two of them causes', async ({ page }) => {
+  await loaded(page);
+  await page.click('#load-sample');
+  await expect(page.locator('#cause-sources li')).toHaveCount(2);
+  await expect(page.locator('#name-changes')).toContainText('changes.csv');
+  await expectChainFindings(page.locator('#result table.findings tbody tr'));
+});
+
+test('a causes file without a type column needs its source', async ({ page }) => {
+  await loaded(page);
+  const s = sample();
+  await page.setInputFiles('#file-causes', [...sampleFiles(s), { name: 'changes.csv', text: s.changes }].map(asFile));
+  // The ledger export dropped with them goes to Changes.
+  await expect(page.locator('#cause-sources li')).toHaveCount(2);
+  await expect(page.locator('#name-changes')).toContainText('changes.csv');
+  await page.locator('#cause-sources select').nth(1).selectOption('');
+  await page.click('#run');
+  await expect(page.locator('#result .issues')).toContainText('approvals.csv: column type not found');
 });
