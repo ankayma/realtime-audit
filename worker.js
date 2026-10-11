@@ -1,7 +1,7 @@
 // Runs the engine off the page's main thread. Loaded by importScripts from a
 // blob: worker, which inherits the page's CSP (connect-src 'none').
 //
-// Messages in:  {id, causes: ArrayBuffer, changes: ArrayBuffer, request: object}
+// Messages in:  {id, causes: ArrayBuffer[], changes: ArrayBuffer, request: object}
 // Messages out: {type: 'ready', sha256} once, then {id, result: string} per run
 //               or {id, error: string}.
 'use strict';
@@ -28,7 +28,7 @@
     self.onmessage = (e) => {
       const { id, causes, changes, request } = e.data;
       try {
-        const out = self.cjcmRun(new Uint8Array(causes), new Uint8Array(changes), JSON.stringify(request));
+        const out = self.cjcmRun(causes.map(b => new Uint8Array(b)), new Uint8Array(changes), JSON.stringify(request));
         self.postMessage({ id, result: out });
       } catch (err) {
         self.postMessage({ id, error: String(err && err.message || err) });

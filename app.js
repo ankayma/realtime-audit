@@ -109,12 +109,14 @@ function startEngine() {
   return ready;
 }
 
+// causes is one ArrayBuffer per causes file, in the order of
+// request.cause_sources.
 async function runEngine(causes, changes, request) {
   await ready;
   const id = ++seq;
   return new Promise((resolve, reject) => {
     waiting.set(id, { resolve, reject });
-    worker.postMessage({ id, causes, changes, request }, [causes, changes]);
+    worker.postMessage({ id, causes, changes, request }, [...causes, changes]);
   }).catch((err) => {
     // The Go runtime does not survive a panic (out of memory, most often).
     // Start a fresh engine so the next run works, and report this one.
@@ -137,6 +139,11 @@ function renderResult(root, res, opts = {}) {
     `Read ${plural(s.causes_read, 'cause')} of ${s.cause_rows.toLocaleString('en')} rows and ${plural(s.changes_read, 'change')} of ${s.change_rows.toLocaleString('en')} rows`,
     s.windows ? `, ${plural(s.balances, 'balance')} over ${plural(s.windows, 'window')}, ${when(s.from)} to ${when(s.to)}.` : '.');
   root.append(read);
+  if (res.sources.length > 1) {
+    root.append(h('ul', { class: 'stats' }, res.sources.map(src => h('li', {},
+      h('code', {}, src.name), `: ${plural(src.read, 'row')} read of ${src.rows.toLocaleString('en')}`,
+      src.type ? `, as ${src.type}` : '', src.producer ? ` from ${src.producer}` : ''))));
+  }
 
   const notes = [];
   if (s.causes_without_id) notes.push(`Causes: ${plural(s.causes_without_id, 'row has', 'rows have')} no id. A cause without an id can't be checked for reuse.`);
@@ -150,7 +157,7 @@ function renderResult(root, res, opts = {}) {
     root.append(h('div', { class: 'box bad' },
       h('p', {}, h('strong', {}, plural(res.issues.length, 'line', 'lines') + " didn't fit"), ' and were left out of the check:'),
       h('ul', { class: 'issues' }, shown.map(i => h('li', {},
-        i.line ? `${cap(i.file)}, line ${i.line}: ` : `${cap(i.file)}: `, md(i.msg)))),
+        i.line ? `${fileLabel(i.file)}, line ${i.line}: ` : `${fileLabel(i.file)}: `, md(i.msg)))),
       res.issues.length > shown.length ? h('p', { class: 'muted' }, `… and ${(res.issues.length - shown.length).toLocaleString('en')} more.`) : null));
   }
 
@@ -240,6 +247,9 @@ function renderResult(root, res, opts = {}) {
 
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+// Issues name a file: "causes", "changes", "settings", or a causes file's own name.
+function fileLabel(f) { return ['causes', 'changes', 'settings'].includes(f) ? cap(f) : f; }
+
 // Renders `code` spans in engine messages.
 function md(msg) {
   return msg.split(/(`[^`]*`)/).map(p => p.startsWith('`') && p.endsWith('`') && p.length > 1 ? h('code', {}, p.slice(1, -1)) : p);
@@ -257,29 +267,38 @@ function findingsCSV(findings) {
 
 // ---------- column mapping ----------
 
-const mapping = { causes: {}, changes: {} };
+// Column choices: one map per causes file (parallel to files.causes), one for changes.
+const mapping = { changes: {} };
 
 function renderMapping(res) {
   const root = $('columns');
-  const files = [['causes', CAUSE_FIELDS, res.headers.causes], ['changes', CHANGE_FIELDS, res.headers.changes]];
-  if (!files.some(([, , hs]) => hs && hs.length)) { root.hidden = true; return; }
+  const groups = res.sources.map((src, i) => ({
+    label: src.name, fields: CAUSE_FIELDS, headers: src.headers, used: src.columns,
+    required: REQUIRED.causes.filter(f => !(f === 'type' && files.causes[i] && stageOf(files.causes[i]).type)),
+    set: (f, v) => { if (files.causes[i]) files.causes[i].columns[f] = v; },
+  }));
+  groups.push({
+    label: 'Changes', fields: CHANGE_FIELDS, headers: res.headers.changes, used: res.columns.changes,
+    required: REQUIRED.changes, set: (f, v) => { mapping.changes[f] = v; },
+  });
+  if (!groups.some(g => g.headers && g.headers.length)) { root.hidden = true; return; }
   root.replaceChildren(h('h3', {}, 'Columns used'),
     h('p', { class: 'muted' }, 'Change a column and the check runs again.'));
   const grid = h('div', { class: 'mapping-grid' });
-  for (const [file, fields, headers] of files) {
-    if (!headers || !headers.length) continue;
-    const used = res.columns[file] || {};
-    const group = h('fieldset', {}, h('legend', {}, cap(file)));
-    for (const f of fields) {
-      const req = REQUIRED[file].includes(f);
+  for (const g of groups) {
+    if (!g.headers || !g.headers.length) continue;
+    const used = g.used || {};
+    const group = h('fieldset', {}, h('legend', {}, g.label));
+    for (const f of g.fields) {
+      const req = g.required.includes(f);
       const sel = h('select', {
-        'data-file': file, 'data-field': f,
+        'data-file': g.label, 'data-field': f,
         class: req && !used[f] ? 'missing' : null,
         onchange: (e) => {
-          mapping[file][f] = e.target.value;
+          g.set(f, e.target.value);
           runUser();
         },
-      }, h('option', { value: '' }, '— none —'), headers.map(x => h('option', { value: x, selected: used[f] === x }, x)));
+      }, h('option', { value: '' }, '— none —'), g.headers.map(x => h('option', { value: x, selected: used[f] === x }, x)));
       group.append(h('label', {}, h('span', {}, f, req ? ' *' : ''), sel));
     }
     grid.append(group);
@@ -290,36 +309,115 @@ function renderMapping(res) {
 
 // ---------- inputs ----------
 
-const files = { causes: null, changes: null };
+// files.causes: one entry per causes file, {file, stage, columns}; stage is
+// "type@producer" from the chains setting, or "" when the rows name their own.
+const files = { causes: [], changes: null };
 
-function setFile(kind, file) {
-  files[kind] = file;
-  mapping[kind] = {};
-  $(`name-${kind}`).textContent = file ? `${file.name} · ${(file.size / 1e6).toFixed(file.size < 1e5 ? 3 : 1)} MB` : 'Drop a file or click to choose';
-  $(`drop-${kind}`).classList.toggle('has-file', !!file);
-  $('run').disabled = !(files.causes && files.changes);
+function size(file) {
+  return file.size < 1e6 ? `${Math.max(1, Math.round(file.size / 1e3))} KB` : `${(file.size / 1e6).toFixed(1)} MB`;
+}
+
+function ready2run() {
+  return files.causes.length > 0 && !!files.changes;
+}
+
+// The stages declared in the chains setting, in order.
+function stages() {
+  const out = [];
+  for (const line of $('opt-chains').value.split(/[;\n]/)) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    for (const part of line.split('>')) {
+      const [type, producer = ''] = part.split('@').map(s => s.trim());
+      if (type) out.push({ type, producer, key: producer ? `${type}@${producer}` : type });
+    }
+  }
+  return out;
+}
+
+function stageOf(entry) {
+  const [type = '', producer = ''] = entry.stage.split('@');
+  return { type, producer };
+}
+
+// Guesses a file's stage from its name: "approvals.csv" is the stage whose
+// type ends in "approved", "requests.csv" the one ending in "requested".
+function guessStage(name) {
+  const n = name.toLowerCase();
+  const hits = stages().filter(s => {
+    const last = s.type.split('.').pop().toLowerCase().replace(/e?d$/, '');
+    return last.length >= 4 && n.includes(last);
+  });
+  const best = hits.find(s => n.includes(s.type.split('.')[0].toLowerCase())) || hits[0];
+  return best ? best.key : '';
+}
+
+function addCauses(list) {
+  for (const file of list) {
+    files.causes.push({ file, stage: guessStage(file.name), columns: {} });
+  }
+  renderSources();
+}
+
+function setChanges(file) {
+  files.changes = file;
+  mapping.changes = {};
+  $('name-changes').textContent = file ? `${file.name} · ${size(file)}` : 'Drop a file or click to choose';
+  $('drop-changes').classList.toggle('has-file', !!file);
+  $('run').disabled = !ready2run();
+}
+
+function renderSources() {
+  const list = $('cause-sources');
+  const all = stages();
+  list.replaceChildren(...files.causes.map((entry, i) => {
+    if (entry.stage && !all.some(s => s.key === entry.stage)) entry.stage = '';
+    return h('li', {},
+      h('span', { class: 'src-name' }, `${entry.file.name} · ${size(entry.file)}`),
+      h('label', {}, h('span', { class: 'muted' }, 'source'),
+        h('select', {
+          'aria-label': `Source of ${entry.file.name}`,
+          onchange: (e) => { entry.stage = e.target.value; },
+        },
+        h('option', { value: '' }, 'rows have their own type column'),
+        all.map(s => h('option', { value: s.key, selected: entry.stage === s.key },
+          s.producer ? `${s.producer} · ${s.type}` : s.type)))),
+      h('button', {
+        type: 'button', class: 'remove', 'aria-label': `Remove ${entry.file.name}`,
+        onclick: () => { files.causes.splice(i, 1); renderSources(); },
+      }, '✕'));
+  }));
+  const n = files.causes.length;
+  $('name-causes').textContent = n
+    ? `${plural(n, 'file')}. Drop more to add a source.`
+    : 'Drop one or more files, or click to choose';
+  $('drop-causes').classList.toggle('has-file', n > 0);
+  $('run').disabled = !ready2run();
 }
 
 function wireDrop(kind) {
   const zone = $(`drop-${kind}`);
   const input = $(`file-${kind}`);
-  input.addEventListener('change', () => { if (input.files[0]) setFile(kind, input.files[0]); });
+  const take = (list) => {
+    if (kind === 'changes') {
+      if (list[0]) setChanges(list[0]);
+      return;
+    }
+    // Several files on Causes: a ledger export among them goes to Changes.
+    const isChanges = (f) => /change|effect|ledger|balance_write/i.test(f.name);
+    const rest = [];
+    for (const f of list) {
+      if (list.length > 1 && !files.changes && isChanges(f)) setChanges(f);
+      else rest.push(f);
+    }
+    addCauses(rest);
+  };
+  input.addEventListener('change', () => { take([...input.files]); input.value = ''; });
   zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('over'));
   zone.addEventListener('drop', (e) => {
     e.preventDefault();
     zone.classList.remove('over');
-    const dropped = [...e.dataTransfer.files];
-    if (dropped.length === 2) {
-      // Both at once: guess which is which by name, else by drop order.
-      const isChanges = (f) => /change|effect|write|balance/i.test(f.name);
-      const [a, b] = dropped;
-      const changesFirst = isChanges(a) && !isChanges(b);
-      setFile('causes', changesFirst ? b : a);
-      setFile('changes', changesFirst ? a : b);
-    } else if (dropped[0]) {
-      setFile(kind, dropped[0]);
-    }
+    take([...e.dataTransfer.files]);
   });
   zone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
 }
@@ -340,8 +438,10 @@ function request() {
     chains: $('opt-chains').value,
     check_amounts: $('opt-amounts').checked,
     require_cause_id: $('opt-require-id').checked,
-    cause_columns: nonEmpty(mapping.causes),
     change_columns: nonEmpty(mapping.changes),
+    cause_sources: files.causes.map(entry => ({
+      name: entry.file.name, ...stageOf(entry), columns: nonEmpty(entry.columns),
+    })),
   };
 }
 
@@ -366,11 +466,11 @@ const LARGE = 150e6;
 let running = false;
 
 async function runUser() {
-  if (!files.causes || !files.changes || running) return;
+  if (!ready2run() || running) return;
   const section = $('result-section');
   const out = $('result');
   section.hidden = false;
-  const total = files.causes.size + files.changes.size;
+  const total = files.causes.reduce((n, c) => n + c.file.size, 0) + files.changes.size;
   out.replaceChildren(h('p', { class: 'stats', role: 'status' },
     total > LARGE ? `Running on ${(total / 1e6).toFixed(0)} MB. This is above what a browser tab reliably holds; if it fails, use the audit CLI.` : 'Running…'));
   running = true;
@@ -378,18 +478,19 @@ async function runUser() {
   const t0 = performance.now();
   try {
     const req = request();
-    const [c, d] = await Promise.all([files.causes.arrayBuffer(), files.changes.arrayBuffer()]);
+    const c = await Promise.all(files.causes.map(entry => entry.file.arrayBuffer()));
+    const d = await files.changes.arrayBuffer();
     const res = await runEngine(c, d, req);
     res.request = req;
     renderMapping(res);
     renderResult(out, res);
-    out.prepend(h('p', { class: 'muted' }, `${files.causes.name} + ${files.changes.name} · ${((performance.now() - t0) / 1000).toFixed(1)} s in this browser`));
+    out.prepend(h('p', { class: 'muted' }, `${files.causes.map(c => c.file.name).join(' + ')} + ${files.changes.name} · ${((performance.now() - t0) / 1000).toFixed(1)} s in this browser`));
   } catch (err) {
     out.replaceChildren(h('div', { class: 'box bad' }, h('strong', {}, 'The run failed: '), err.message,
       total > 50e6 ? ' Large inputs can exhaust the memory a browser gives a page; the audit CLI runs the same check without that limit.' : ''));
   } finally {
     running = false;
-    $('run').disabled = !(files.causes && files.changes);
+    $('run').disabled = !ready2run();
   }
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -398,21 +499,25 @@ async function runUser() {
 
 async function main() {
   const s = DATA.sample;
-  $('sample-causes').textContent = s.causes;
+  $('sample-requests').textContent = s.requests;
+  $('sample-approvals').textContent = s.approvals;
   $('sample-changes').textContent = s.changes;
-  $('sample-causes-n').textContent = `(${s.causes.trim().split('\n').length} rows)`;
-  $('sample-changes-n').textContent = `(${s.changes.trim().split('\n').length} rows)`;
 
   for (const b of document.querySelectorAll('[data-template]')) {
     b.addEventListener('click', () => download(b.dataset.template, DATA.templates[b.dataset.template], 'text/csv'));
   }
   wireDrop('causes');
   wireDrop('changes');
+  $('opt-chains').addEventListener('input', renderSources);
   $('settings').addEventListener('submit', (e) => { e.preventDefault(); runUser(); });
   $('load-sample').addEventListener('click', () => {
     applyRequest(s.request);
-    setFile('causes', new File([s.causes], 'causes.csv', { type: 'text/csv' }));
-    setFile('changes', new File([s.changes], 'changes.csv', { type: 'text/csv' }));
+    files.causes = s.request.cause_sources.map(src => ({
+      file: new File([s[src.name.replace('.csv', '')]], src.name, { type: 'text/csv' }),
+      stage: `${src.type}@${src.producer}`, columns: {},
+    }));
+    renderSources();
+    setChanges(new File([s.changes], 'changes.csv', { type: 'text/csv' }));
     runUser();
   });
 
@@ -425,7 +530,7 @@ async function main() {
     }
     status.textContent = 'Engine loaded. Nothing else will be fetched.';
     status.classList.add('ok');
-    $('run').disabled = !(files.causes && files.changes);
+    $('run').disabled = !ready2run();
   } catch (err) {
     status.textContent = `The engine could not start: ${err.message}`;
     status.classList.add('bad');
@@ -434,11 +539,11 @@ async function main() {
 
   const enc = new TextEncoder();
   try {
-    const res = await runEngine(enc.encode(s.causes).buffer, enc.encode(s.changes).buffer, s.request);
+    const res = await runEngine([enc.encode(s.requests).buffer, enc.encode(s.approvals).buffer], enc.encode(s.changes).buffer, s.request);
     res.request = s.request;
     renderResult($('sample-result'), res, { expected: s.alerts });
     $('sample-result').prepend(h('p', { class: 'muted' },
-      'Chain: withdrawal.requested@user-api > withdrawal.approved@admin-console. 60 s windows, amount check on, cause id required.'));
+      'requests.csv as withdrawal.requested from user-api, approvals.csv as withdrawal.approved from admin-console. Chain: withdrawal.requested@user-api > withdrawal.approved@admin-console. 60 s windows, amount check on, cause id required.'));
   } catch (err) {
     $('sample-result').replaceChildren(h('div', { class: 'box bad' }, err.message));
   }
